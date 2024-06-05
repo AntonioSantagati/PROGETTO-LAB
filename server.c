@@ -4,147 +4,104 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-#include <security/pam_appl.h>
-#include <security/pam_misc.h>
 #include <unistd.h>
 
-#define N_THREADS 3
+#define N_THREADS 10
 #define BUFFER_SIZE 4096
 #define PORT 6969
 #define IP_ADDRESS "127.0.0.1"
 
-int connections = 0;
-int counter = 0;
 pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
 
-typedef struct {
-    const char *username;
-    const char *password;
-} pam_auth_data;
+typedef struct{
+    int client_socket;
+    char video_name[BUFFER_SIZE];
+}client_info_t;
 
-static int pam_conversation(int num_msg, const struct pam_message **msg,
-                            struct pam_response **resp, void *appdata_ptr) {
-    pam_auth_data *data = (pam_auth_data *)appdata_ptr;
-    struct pam_response *responses = calloc(num_msg, sizeof(struct pam_response));
+int verify(const char *username, const char *password, int client_descriptor){
+    char file_username[BUFFER_SIZE];
+    char file_password[BUFFER_SIZE];
+    char line[BUFFER_SIZE];
+    FILE *check_user = fopen("check_user.txt", "r");
 
-    for (int i = 0; i < num_msg; ++i) {
-        responses[i].resp = NULL;
-        responses[i].resp_retcode = 0;
-
-        switch (msg[i]->msg_style) {
-            case PAM_PROMPT_ECHO_OFF:
-                responses[i].resp = strdup(data->password);
-                break;
-            case PAM_PROMPT_ECHO_ON:
-                responses[i].resp = strdup(data->username);
-                break;
-            case PAM_ERROR_MSG:
-            case PAM_TEXT_INFO:
-                break;
-            default:
-                free(responses);
-                return PAM_CONV_ERR;
-        }
+    if (check_user == NULL){
+        perror("Error opening file");
+        return EXIT_FAILURE;
     }
 
-    *resp = responses;
-    return PAM_SUCCESS;
-}
-
-int authenticate(const char *username, const char *password) {
-    pam_handle_t *pamh = NULL;
-    int retval;
-    pam_auth_data data = {username, password};
-    struct pam_conv pam_conversation1 = {pam_conversation, &data};
-
-    retval = pam_start("check_user", username, &pam_conversation1, &pamh);
-    if (retval != PAM_SUCCESS) {
-        return 1;
-    }
-
-    retval = pam_authenticate(pamh, 0);
-    if (retval != PAM_SUCCESS) {
-        pam_end(pamh, retval);
-        return 2;
-    }
-
-    retval = pam_acct_mgmt(pamh, 0);
-    if (retval != PAM_SUCCESS) {
-        pam_end(pamh, retval);
-        return 3;
-    }
-
-    pam_end(pamh, PAM_SUCCESS);
-    return 0;
-}
-
-void *task(void *arg) {
-    int client_descriptor = (int)(intptr_t)arg;
-    char buffer[BUFFER_SIZE];
-
-    printf("request username...\n");
-    send(client_descriptor, "Username: ", strlen("Username: "), 0);
-    read(client_descriptor, buffer, BUFFER_SIZE);
-    char username[BUFFER_SIZE];
-    strcpy(username, buffer);
-    memset(buffer, 0, BUFFER_SIZE);
-    printf("Username received..\n");
-
-    printf("request password...\n");
-    send(client_descriptor, "Password: ", strlen("Password: "), 0);
-    read(client_descriptor, buffer, BUFFER_SIZE);
-    char password[BUFFER_SIZE];
-    strcpy(password, buffer);
-    memset(buffer, 0, BUFFER_SIZE);
-    printf("Password received..\nAuthentication...\n");
-
-    if (authenticate(username, password) != 0) {
-        printf("%d",authenticate(username, password));
-        printf("%zu-%zu",username,password);
-        send(client_descriptor, "Authentication Failed\n", strlen("Authentication Failed\n"), 0);
-        close(client_descriptor);
-    } else {
-        send(client_descriptor, "Authenticated\n", strlen("Authenticated\n"), 0);
-
-        FILE *video_file = fopen("sium.mp4", "rb");
-        if (video_file == NULL) {
-            perror("Error opening video file");
-            close(client_descriptor);
-            return NULL;
-        }
-
-        while (!feof(video_file)) {
-            size_t bytes_read = fread(buffer, 1, sizeof(buffer), video_file);
-            if (bytes_read > 0) {
-                printf("Bytes read from video file: %zu\n", bytes_read);
-                ssize_t bytes_sent = send(client_descriptor, buffer, bytes_read, 0);
-                if (bytes_sent == -1) {
-                    perror("Error sending data");
-                    break;
-                }
-                printf("Bytes sent to client: %zu\n", bytes_sent);
+    while (fgets(line, sizeof(line), check_user)) {
+        if (sscanf(line, "%s %s", file_username, file_password) == 2) {
+            if (strcmp(file_username, username) == 0 && strcmp(file_password, password) == 0) {
+                printf("Authenticated!\n");
+                send(client_descriptor, "Authenticated\n", strlen("Authenticated\n"), 0);
+                fclose(check_user);
+                return 0;
             }
         }
-
-        printf("Closing client connection...\n");
-        fclose(video_file);
-        close(client_descriptor);
     }
 
-    pthread_mutex_lock(&m);
-    counter++;
-    connections--;
-    pthread_mutex_unlock(&m);
+    fclose(check_user);
+    return EXIT_FAILURE;
+}
 
+void *handle_client(void *arg) {
+    client_info_t *client_info = (client_info_t *)arg;
+    int client_socket = client_info->client_socket;
+    char buffer[BUFFER_SIZE];
+    char video[BUFFER_SIZE];
+
+    // Invio della lista dei video al client
+    char *video_names[] = {"valenzia", "sium", "genas", "galaxy"};
+    char video_list[BUFFER_SIZE] = "";
+    for (int i = 0; i < sizeof(video_names) / sizeof(char *); i++) {
+        strcat(video_list, video_names[i]);
+        strcat(video_list, "\n");
+    }
+    send(client_socket, video_list, strlen(video_list), 0);
+
+    // Ricezione della scelta del video dal client
+    memset(buffer, 0, BUFFER_SIZE);  // Pulizia del buffer prima della lettura
+    if (read(client_socket, buffer, BUFFER_SIZE) <= 0) {
+        perror("Error reading video choice from client");
+        close(client_socket);
+        free(client_info);
+        return NULL;
+    }
+
+    snprintf(video, BUFFER_SIZE, "%s.mp4", buffer); // Formattazione sicura del nome del file
+    printf("Selected video: %s\n", video);
+    strcpy(client_info->video_name, video);
+
+    // Apertura e invio del file video
+    FILE *video_file = fopen(client_info->video_name, "rb");
+    if (video_file == NULL) {
+        perror("Error opening video file");
+        close(client_socket);
+        free(client_info);
+        return NULL;
+    }
+
+    while (!feof(video_file)) {
+        size_t bytes_read = fread(buffer, 1, sizeof(buffer), video_file);
+        if (bytes_read > 0) {
+            send(client_socket, buffer, bytes_read, 0);
+        }
+    }
+
+    fclose(video_file);
+    close(client_socket);
+    free(client_info);
     return NULL;
 }
 
-int main(int argc, char *argv[]) {
-    int socket_descriptor, client_size, client_socket;
-    struct sockaddr_in server_addr, client_address;
 
-    socket_descriptor = socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_descriptor == -1) {
+int main() {
+    int server_socket, client_socket;
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t client_addr_len = sizeof(client_addr);
+
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket == -1) {
         perror("Error creating socket");
         return EXIT_FAILURE;
     }
@@ -153,34 +110,60 @@ int main(int argc, char *argv[]) {
     server_addr.sin_port = htons(PORT);
     server_addr.sin_addr.s_addr = inet_addr(IP_ADDRESS);
 
-    if (bind(socket_descriptor, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("Error binding socket");
-        close(socket_descriptor);
+        close(server_socket);
         return EXIT_FAILURE;
     }
 
-    if (listen(socket_descriptor, N_THREADS) < 0) {
+    if (listen(server_socket, N_THREADS) < 0) {
         perror("Error listening on socket");
-        close(socket_descriptor);
+        close(server_socket);
         return EXIT_FAILURE;
     }
 
-    pthread_t threads[N_THREADS];
+    printf("Server listening on %s:%d\n", IP_ADDRESS, PORT);
 
     while (1) {
-        client_size = sizeof(client_address);
-        client_socket = accept(socket_descriptor, (struct sockaddr *)&client_address, (socklen_t *)&client_size);
+        client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len);
         if (client_socket < 0) {
             perror("Error accepting client");
             continue;
         }
-        pthread_mutex_lock(&m);
-        printf("Client accepted...\n");
-        pthread_create(&threads[connections], NULL, &task, (void *)(intptr_t)client_socket);
-        connections++;
-        pthread_mutex_unlock(&m);
+        char buffer_verify[BUFFER_SIZE];
+
+        printf("request username...\n");
+        send(client_socket,"Username: ",strlen("Username: "),0);
+        read(client_socket,buffer_verify,BUFFER_SIZE);
+        char username[BUFFER_SIZE];
+        strcpy(username,buffer_verify);
+        memset(buffer_verify,0,BUFFER_SIZE);
+        printf("Username recieved..\n");
+
+
+        printf("request passowrd...\n");
+        send(client_socket, "Password: ", strlen("Password: "), 0);
+        read(client_socket, buffer_verify, BUFFER_SIZE);
+        char password[BUFFER_SIZE];
+        strcpy(password, buffer_verify);
+        memset(buffer_verify, 0, BUFFER_SIZE);
+        printf("password recieved..\nAuthentication...\n");
+
+        if(verify(username,password,client_socket)==0){
+            client_info_t *client_info = malloc(sizeof(client_info_t));
+            client_info->client_socket = client_socket;
+            pthread_t thread;
+            pthread_create(&thread, NULL, handle_client, (void *)client_info);
+            pthread_detach(thread);
+        }
+        else{
+            send(client_socket, "Authentication Failed\n", strlen("Authentication Failed\n"), 0);
+            printf("Authentication Failed\n");
+            return -1;
+
+        }
     }
 
-    close(socket_descriptor);
+    close(server_socket);
     return 0;
 }

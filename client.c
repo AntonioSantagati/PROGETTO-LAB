@@ -1,68 +1,170 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
-#include<arpa/inet.h>
+#include <arpa/inet.h>
 #include <unistd.h>
-#include <pthread.h>
+#include <vlc/vlc.h>
 
-#define N_THREADS 30
+#define SERVER_IP "127.0.0.1"
+#define SERVER_PORT 6969
+#define BUFFER_SIZE 4096
 
+int init_socket() {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    char buffer[BUFFER_SIZE] = {0};
+    char authentication[BUFFER_SIZE];
+    char username[BUFFER_SIZE] = {0};
+    char password[BUFFER_SIZE] = {0};
+    char video_choice[BUFFER_SIZE];
+    if (sock < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
 
+    struct sockaddr_in server_address;
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(SERVER_PORT);
+    server_address.sin_addr.s_addr = inet_addr(SERVER_IP);
 
-void* job(void*arg){
-    //variabili utili 
-    int* n=(int*)arg;
-    int socket_descriptor;
-    struct sockaddr_in server_addr;
-    char server_message[2000],client_message[2000];
+    if (connect(sock, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
+        perror("Connect failed");
+        close(sock);
+        exit(EXIT_FAILURE);
+    }
+    read(sock, buffer, BUFFER_SIZE);
+    printf("%s", buffer);
+    fgets(username, BUFFER_SIZE, stdin);
+    username[strcspn(username, "\n")] = '\0';  // Remove newline character
+    send(sock, username, strlen(username), 0);
 
-    //clean buffers
-    memset(server_message,'\0',sizeof(server_message));
-    memset(client_message,'\0',sizeof(client_message));
+    // // Get password
+    memset(buffer, 0, BUFFER_SIZE);
+    read(sock, buffer, BUFFER_SIZE);
+    printf("%s", buffer);
+    fgets(password, BUFFER_SIZE, stdin);
+    password[strcspn(password, "\n")] = '\0';  // Remove newline character
+    send(sock, password, strlen(password), 0);
 
-    //1. create socket
-    socket_descriptor = socket(AF_INET,SOCK_STREAM,0);
+    // // Authentication response
+    memset(buffer, 0, BUFFER_SIZE);
+    read(sock, buffer, BUFFER_SIZE);
+    strcpy(authentication, buffer);
+    printf("%s", buffer);
+    //send(sock,authentication,strlen(authentication),0);
+    memset(buffer, 0, BUFFER_SIZE);
+    if(strcmp (authentication, "Authenticated\n")==0){
+            printf("Lista dei video disponibili:\n");
+            read(sock, buffer, BUFFER_SIZE);
+            printf("%s", buffer);
 
-    //2. assign SOCK_TIPE, PORT, IP DEL SERVER
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(3490);
-    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-   
-
-    //3. send connectio reuquest to server 
-    connect(socket_descriptor, (struct sockaddr *)&server_addr, sizeof(server_addr));
-
+        // User selects a video
+            printf("Choose a video to be displayed...\n");
+            fgets(video_choice, BUFFER_SIZE, stdin);
+            video_choice[strcspn(video_choice, "\n")] = 0; // Remove newline character
+            send(sock, video_choice, strlen(video_choice), 0);
     
-    //4. send message 
-    sprintf(client_message, "Connection established with Client %d\n",n);
-    send(socket_descriptor, client_message,strlen(client_message),0);
+    //if(strcmp (authentication, "Authenticated\n")==0){
+            return sock;
+    }
 
-    //5 receive
-    recv(socket_descriptor,server_message,sizeof(server_message),0);
-    printf("server message: %s\n",server_message);
-
-    //6. close socket
-    close(socket_descriptor);
-    sleep(5);
-    pthread_exit(NULL);
-    
+    else{
+        return -1;
+    }
 }
 
+static int open_media(void *opaque, void **datap, uint64_t *sizep) {
+    int sock = *(int *)opaque;
+    *datap = opaque;
+    *sizep = 0; // Unknown size
+    return 0; // Success
+}
 
-int main(int argc, char *argv[]){
-    
-    pthread_t t[N_THREADS];
-    for (int i = 0; i < N_THREADS; i++)
-    {   
-        pthread_create(&t[i], NULL, &job, (void*)i);      
+static ssize_t read_media(void *opaque, unsigned char *buf, size_t len) {
+    int sock = *(int *)opaque;
+    ssize_t bytes_read = read(sock, buf, len);
+    if (bytes_read < 0) {
+        perror("Read failed");
+        return 0; // Return 0 to signal EOF to VLC
     }
-    
+    return bytes_read;
+}
 
-    for ( int i = 0; i < N_THREADS; i++)
-    {
-        pthread_join(t[i], NULL);
+static int seek_media(void *opaque, uint64_t offset) {
+    // Implement seek if needed
+    return -1; // Seek not supported
+}
+
+static void close_media(void *opaque) {
+    // No additional cleanup needed
+}
+
+int main() {
+    int sock = init_socket();
+    if (sock < 0){
+        return 1;
     }
+
+    const char *vlc_args[] = {
+            "--no-xlib"
+        };
+
+    libvlc_instance_t *vlc_instance = libvlc_new(0, vlc_args);
+    if (!vlc_instance) {
+        fprintf(stderr, "libvlc initialization failed\n");
+        close(sock);
+        return EXIT_FAILURE;
+    }
+
+    libvlc_media_player_t *mp = libvlc_media_player_new(vlc_instance);
+    if (!mp) {
+        fprintf(stderr, "libvlc media player creation failed\n");
+        libvlc_release(vlc_instance);
+        close(sock);
+        return EXIT_FAILURE;
+    }
+
+    libvlc_media_t *m = libvlc_media_new_callbacks(
+        vlc_instance, open_media, read_media, seek_media, close_media, &sock
+    );
+    if (!m) {
+        fprintf(stderr, "libvlc media creation failed\n");
+        libvlc_media_player_release(mp);
+        libvlc_release(vlc_instance);
+        close(sock);
+        return EXIT_FAILURE;
+    }
+
+    libvlc_media_player_set_media(mp, m);
+    libvlc_media_release(m);
+
+    libvlc_media_player_play(mp);
+    printf("Streaming video...\n");
+
+    //getchar(); // Wait for user input to terminate
+
+    printf("Streaming video...\nPress 'p' to pause/play, 's' to stop, 'q' to quit.\n");
+
+    char command;
+    while ((command = getchar())) {
+        switch (command) {
+            case '\n':
+                libvlc_media_player_pause(mp);
+                break;
+            case 'q':
+                goto cleanup;
+            default:
+                continue;
+        }
+    }
+
+cleanup:
+    libvlc_media_player_stop(mp);
+    libvlc_media_player_release(mp);
+    libvlc_release(vlc_instance);
+    close(sock);
 
     return 0;
     
