@@ -56,9 +56,14 @@ int init_socket() {
     //send(sock,authentication,strlen(authentication),0);
     memset(buffer, 0, BUFFER_SIZE);
     if(strcmp (authentication, "Authenticated\n")==0){
-            printf("Lista dei video disponibili:\n");
             read(sock, buffer, BUFFER_SIZE);
-            printf("%s", buffer);
+            if(strcmp (buffer,"User already logged\n")==0){
+                printf("%s", buffer);
+                return -1;
+            }
+                printf("Lista dei video disponibili:\n");
+                printf("%s", buffer);
+            
 
         // User selects a video
             printf("Choose a video to be displayed...\n");
@@ -141,11 +146,8 @@ int main() {
     libvlc_media_release(m);
 
     libvlc_media_player_play(mp);
-    printf("Streaming video...\n");
 
-    //getchar(); // Wait for user input to terminate
-
-    printf("Streaming video...\nPress 'p' to pause/play, 's' to stop, 'q' to quit.\n");
+    printf("Streaming video...\nPress send to pause/play, 'q' to quit.\n");
 
     char command;
     while ((command = getchar())) {
@@ -154,18 +156,22 @@ int main() {
                 libvlc_media_player_pause(mp);
                 break;
             case 'q':
-                goto cleanup;
+                send(sock, &command, 1, 0);
+                libvlc_media_player_stop(mp);
+                libvlc_media_player_release(mp);
+                libvlc_release(vlc_instance);
+                close(sock);
+                return 0;
             default:
                 continue;
         }
     }
 
-cleanup:
+/*cleanup:
     libvlc_media_player_stop(mp);
     libvlc_media_player_release(mp);
     libvlc_release(vlc_instance);
     close(sock);
-
-    return 0;
+    return 0;*/
     
 }
