@@ -6,10 +6,17 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <vlc/vlc.h>
+#include <time.h>
 
 #define SERVER_IP "127.0.0.1"
 #define SERVER_PORT 6969
 #define BUFFER_SIZE 4096
+
+long long current_time_millis() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts); // CLOCK_MONOTONIC è una scelta comune, può essere anche CLOCK_REALTIME
+    return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
 
 int init_socket() {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -107,6 +114,7 @@ static void close_media(void *opaque) {
 }
 
 int main() {
+    long long start_time = current_time_millis();
     int sock = init_socket();
     if (sock < 0){
         return 1;
@@ -146,7 +154,9 @@ int main() {
     libvlc_media_release(m);
 
     libvlc_media_player_play(mp);
-
+    long long end_time = current_time_millis();
+    long long elapsed_time = end_time - start_time;
+    printf("%2lld",elapsed_time);
     printf("Streaming video...\nPress send to pause/play, 'q' to quit.\n");
 
     char command;
